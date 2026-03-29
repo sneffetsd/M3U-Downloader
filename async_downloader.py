@@ -1,7 +1,7 @@
 import aiohttp
 import aiofiles
 import asyncio
-from typing import Callable, Optional, Dict
+from typing import Callable, Optional
 import os
 from concurrent.futures import ThreadPoolExecutor
 from download_optimizer import DownloadOptimizer, ConnectionPool
@@ -57,12 +57,20 @@ class AsyncDownloader:
         
         return url
 
-    async def download_file(self, url: str, filepath: str, 
-                          progress_callback: Optional[Callable[[str, float, Optional[str]], None]] = None) -> None:
+    async def download_file(
+        self,
+        url: str,
+        filepath: str,
+        progress_callback: Optional[Callable[[str, float, Optional[str]], None]] = None,
+        error_callback: Optional[Callable[[str, str], None]] = None,
+    ) -> None:
+        filename = os.path.basename(filepath)
         retries = 0
         while retries < self.retry_count:
             try:
                 await self.connection_pool.acquire(url)
+                if progress_callback and retries == 0:
+                    progress_callback(filename, 0.0, None)
                 
                 # Authenticate and get fresh URL if needed
                 if 'play_token' in url:
@@ -116,13 +124,16 @@ class AsyncDownloader:
                                         if progress_callback and total_size:
                                             progress = (downloaded / total_size) * 100
                                             progress_callback(
-                                                os.path.basename(filepath),
+                                                filename,
                                                 progress,
                                                 speed_str
                                             )
                                 
                                 last_update = current_time
                     
+                    if progress_callback:
+                        progress_callback(filename, 100.0, None)
+
                     # If we get here, download was successful
                     return
                     
@@ -131,6 +142,8 @@ class AsyncDownloader:
                 if os.path.exists(filepath):
                     os.remove(filepath)
                 if retries >= self.retry_count - 1:
+                    if error_callback:
+                        error_callback(filename, str(e))
                     raise
                 retries += 1
                 await asyncio.sleep(2)  # Wait before retry
@@ -142,13 +155,23 @@ class DownloadManager:
         self.max_concurrent = max_concurrent
         self.executor = ThreadPoolExecutor(max_workers=max_concurrent)
         
-    def start_downloads(self, downloads: list, progress_callback: Optional[Callable] = None):
+    def start_downloads(
+        self,
+        downloads: list,
+        progress_callback: Optional[Callable] = None,
+        error_callback: Optional[Callable] = None,
+    ):
         async def run_downloads():
             async with AsyncDownloader(self.max_concurrent) as downloader:
                 tasks = []
                 for url, filepath in downloads:
                     task = asyncio.create_task(
-                        downloader.download_file(url, filepath, progress_callback)
+                        downloader.download_file(
+                            url,
+                            filepath,
+                            progress_callback,
+                            error_callback,
+                        )
                     )
                     tasks.append(task)
                 await asyncio.gather(*tasks, return_exceptions=True)

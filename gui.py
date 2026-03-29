@@ -13,7 +13,7 @@ class M3UDownloaderGUI:
     def __init__(self):
         self.window = ThemedTk(theme="equilux")  # Modern dark theme
         self.window.title("M3U Downloader")
-        self.window.geometry("1200x800")
+        self.window.geometry("1200x850")
         
         # Configure colors
         self.colors = {
@@ -26,6 +26,7 @@ class M3UDownloaderGUI:
         self.window.configure(bg=self.colors['bg'])
         self.download_manager = DownloadManager(max_concurrent=3)
         self.entries: List[M3UEntry] = []
+        self.download_items: Dict[str, str] = {}
         self.search_var = tk.StringVar()
         self.setup_gui()
         
@@ -220,12 +221,15 @@ class M3UDownloaderGUI:
             return
             
         downloads = []
+        self.download_items = {}
         for item in items:
             values = self.tree.item(item)['values']
             url = values[1]
             filename = f"{values[0]}{self._get_extension_from_url(url)}"  # Add proper extension
             filepath = ensure_unique_filename(output_dir, filename)
+            download_key = os.path.basename(filepath)
             downloads.append((url, filepath))
+            self.download_items[download_key] = item
             self.tree.set(item, "Status", "Queued")
             self.tree.set(item, "Speed", "")
             
@@ -236,14 +240,14 @@ class M3UDownloaderGUI:
                 print(f"Progress update error: {str(e)}")
             
         def error_callback(filename: str, error: str):
-            self.window.after(0, lambda: self.tree.set(
-                [item for item in self.tree.get_children() 
-                 if self.tree.item(item)['values'][0] == filename][0],
-                "Status", f"Error: {error}"
-            ))
+            self.window.after(0, self._mark_error, filename, error)
 
         try:
-            self.download_manager.start_downloads(downloads, progress_callback=update_progress)
+            self.download_manager.start_downloads(
+                downloads,
+                progress_callback=update_progress,
+                error_callback=error_callback,
+            )
             self.status_var.set("Downloading files...")
         except Exception as e:
             messagebox.showerror("Download Error", f"Failed to start downloads: {str(e)}")
@@ -263,15 +267,46 @@ class M3UDownloaderGUI:
             return f"{speed/(1024*1024):.1f} MB/s"
         
     def _update_progress(self, filename: str, progress: float, speed: str = None):
-        for item in self.tree.get_children():
-            if self.tree.item(item)['values'][0] == filename:
-                status = format_status(progress)
-                self.tree.set(item, "Status", status)
-                if speed and progress < 100:
-                    self.tree.set(item, "Speed", speed)
-                elif progress >= 100:
-                    self.tree.set(item, "Speed", "")  # Clear speed when finished
-                break
+        item = self.download_items.get(filename)
+        if not item:
+            return
+
+        status = format_status(progress)
+        self.tree.set(item, "Status", status)
+        if speed and progress < 100:
+            self.tree.set(item, "Speed", speed)
+        elif progress >= 100:
+            self.tree.set(item, "Speed", "")
+
+        self._refresh_summary_status()
+
+    def _mark_error(self, filename: str, error: str):
+        item = self.download_items.get(filename)
+        if not item:
+            return
+
+        self.tree.set(item, "Status", f"Error: {error}")
+        self.tree.set(item, "Speed", "")
+        self._refresh_summary_status()
+
+    def _refresh_summary_status(self):
+        statuses = [
+            self.tree.item(item)['values'][2]
+            for item in self.download_items.values()
+            if self.tree.exists(item)
+        ]
+
+        if not statuses:
+            return
+
+        finished = sum(1 for status in statuses if status == format_status(100))
+        failed = sum(1 for status in statuses if str(status).startswith("Error:"))
+        total = len(statuses)
+
+        if finished + failed == total:
+            self.status_var.set(f"Completed {finished}/{total} downloads")
+        else:
+            self.status_var.set(f"Downloading... {finished}/{total} completed, {failed} failed")
                 
     def search_titles(self):
         """Filter tree items by title (case-insensitive)."""
