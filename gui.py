@@ -26,6 +26,7 @@ class M3UDownloaderGUI:
         self.window.configure(bg=self.colors['bg'])
         self.download_manager = DownloadManager(max_concurrent=3)
         self.entries: List[M3UEntry] = []
+        self.search_var = tk.StringVar()
         self.setup_gui()
         
     def setup_gui(self):
@@ -111,14 +112,27 @@ class M3UDownloaderGUI:
         y_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         x_scrollbar = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.tree.xview)
         self.tree.configure(yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
+
+        # Search frame to filter by Title
+        search_frame = ttk.Frame(list_frame)
+        search_label = ttk.Label(search_frame, text="Pesquisar (Título):", font=('Segoe UI', 10))
+        search_label.pack(side=tk.LEFT, padx=(0, 6))
+        search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=50, style="Custom.TEntry")
+        search_entry.pack(side=tk.LEFT, padx=(0, 6))
+        search_btn = ttk.Button(search_frame, text="Pesquisar", command=self.search_titles, style="Custom.TButton")
+        search_btn.pack(side=tk.LEFT, padx=(0, 6))
+        clear_btn = ttk.Button(search_frame, text="Limpar", command=self.clear_search, style="Custom.TButton")
+        clear_btn.pack(side=tk.LEFT)
+        search_entry.bind("<Return>", lambda e: self.search_titles())
         
-        # Grid layout
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        y_scrollbar.grid(row=0, column=1, sticky="ns")
-        x_scrollbar.grid(row=1, column=0, sticky="ew")
-        
+        # Grid layout (search on top, tree below)
+        search_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        y_scrollbar.grid(row=1, column=1, sticky="ns")
+        x_scrollbar.grid(row=2, column=0, sticky="ew")
+
         list_frame.grid_columnconfigure(0, weight=1)
-        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_rowconfigure(1, weight=1)
         
         # Control buttons with modern styling
         button_frame = ttk.Frame(main_container)
@@ -165,6 +179,8 @@ class M3UDownloaderGUI:
             
         try:
             self.entries = M3UParser.parse(m3u_file)
+            # clear any active search when loading a new file
+            self.search_var.set("")
             self.tree.delete(*self.tree.get_children())
             for entry in self.entries:
                 self.tree.insert("", tk.END, values=(entry.title, entry.url, "Pending", ""))
@@ -256,6 +272,36 @@ class M3UDownloaderGUI:
                 elif progress >= 100:
                     self.tree.set(item, "Speed", "")  # Clear speed when finished
                 break
+                
+    def search_titles(self):
+        """Filter tree items by title (case-insensitive)."""
+        query = self.search_var.get().strip().lower()
+        # Preserve current statuses/speeds by title
+        status_map = {}
+        for item in self.tree.get_children():
+            vals = self.tree.item(item)['values']
+            if not vals:
+                continue
+            title = vals[0]
+            status = vals[2] if len(vals) > 2 else "Pending"
+            speed = vals[3] if len(vals) > 3 else ""
+            status_map[title] = (status, speed)
+
+        # Rebuild tree with filtered entries
+        self.tree.delete(*self.tree.get_children())
+        count = 0
+        for entry in self.entries:
+            title_lower = (entry.title or "").lower()
+            if query == "" or query in title_lower:
+                status, speed = status_map.get(entry.title, ("Pending", ""))
+                self.tree.insert("", tk.END, values=(entry.title, entry.url, status, speed))
+                count += 1
+
+        self.status_var.set(f"Showing {count} of {len(self.entries)} items")
+
+    def clear_search(self):
+        self.search_var.set("")
+        self.search_titles()
                 
     def run(self):
         self.window.protocol("WM_DELETE_WINDOW", self._on_closing)
