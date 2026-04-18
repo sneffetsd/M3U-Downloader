@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import Iterator, List
 from file_utils import sanitize_filename, get_extension_from_url
 
 class M3UEntry:
@@ -9,12 +9,12 @@ class M3UEntry:
 
 class M3UParser:
     @staticmethod
-    def parse(file_path: str) -> List[M3UEntry]:
-        entries = []
+    def parse_iter(file_path: str) -> Iterator[M3UEntry]:
         current_title = None
         
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
+                count = 0
                 for line in f:
                     line = line.strip()
                     if line.startswith('#EXTINF:'):
@@ -22,12 +22,15 @@ class M3UParser:
                         if len(parts) > 1:
                             current_title = parts[1]
                     elif line and not line.startswith('#'):
-                        title = current_title or f"Video_{len(entries) + 1}"
+                        count += 1
+                        title = current_title or f"Video_{count}"
                         filename = sanitize_filename(title) + get_extension_from_url(line)
-                        entries.append(M3UEntry(title, line, filename))
+                        yield M3UEntry(title, line, filename)
                         current_title = None
                         
         except Exception as e:
             raise Exception(f"Failed to parse M3U file: {str(e)}")
-            
-        return entries
+
+    @staticmethod
+    def parse(file_path: str) -> List[M3UEntry]:
+        return list(M3UParser.parse_iter(file_path))

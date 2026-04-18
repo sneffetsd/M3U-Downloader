@@ -3,6 +3,7 @@ from tkinter import ttk, filedialog, messagebox
 from ttkthemes import ThemedTk
 import os
 from typing import Dict, List, Optional
+import queue
 from m3u_parser import M3UParser, M3UEntry
 from async_downloader import DownloadManager
 from file_utils import ensure_unique_filename
@@ -27,6 +28,8 @@ class M3UDownloaderGUI:
         self.download_manager = DownloadManager(max_concurrent=3)
         self.entries: List[M3UEntry] = []
         self.download_items: Dict[str, str] = {}
+        self.load_queue: "queue.Queue" = queue.Queue()
+        self.loading_m3u = False
         self.search_var = tk.StringVar()
         self.setup_gui()
         
@@ -59,10 +62,20 @@ class M3UDownloaderGUI:
         # Main container
         main_container = ttk.Frame(self.window, padding="20")
         main_container.pack(fill=tk.BOTH, expand=True)
+        self.window.minsize(1000, 650)
         
-        # File selection frame with gradient effect
-        file_frame = ttk.LabelFrame(main_container, text="File Selection", padding="15", style="Custom.TLabelframe")
-        file_frame.pack(fill=tk.X, pady=(0, 15))
+        # Top section: file selection on the left, download settings on the right
+        top_frame = ttk.Frame(main_container)
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        file_frame = ttk.LabelFrame(top_frame, text="File Selection", padding="10", style="Custom.TLabelframe")
+        file_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        settings_frame = ttk.LabelFrame(top_frame, text="Download Settings", padding="10", style="Custom.TLabelframe")
+        settings_frame.grid(row=0, column=1, sticky="nsew")
+        
+        top_frame.columnconfigure(0, weight=3)
+        top_frame.columnconfigure(1, weight=1)
+        top_frame.rowconfigure(0, weight=1)
         
         self.m3u_path = tk.StringVar()
         self.output_dir = tk.StringVar()
@@ -72,7 +85,7 @@ class M3UDownloaderGUI:
         file_select_frame.pack(fill=tk.X, pady=5)
         
         ttk.Label(file_select_frame, text="M3U File:", font=('Segoe UI', 10)).pack(side=tk.LEFT, padx=5)
-        ttk.Entry(file_select_frame, textvariable=self.m3u_path, width=70, style="Custom.TEntry").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(file_select_frame, textvariable=self.m3u_path, width=58, style="Custom.TEntry").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         ttk.Button(file_select_frame, text="Browse", command=self.browse_m3u, style="Custom.TButton").pack(side=tk.LEFT, padx=5)
         
         # Output directory selection with modern layout
@@ -80,20 +93,19 @@ class M3UDownloaderGUI:
         output_select_frame.pack(fill=tk.X, pady=5)
         
         ttk.Label(output_select_frame, text="Output Directory:", font=('Segoe UI', 10)).pack(side=tk.LEFT, padx=5)
-        ttk.Entry(output_select_frame, textvariable=self.output_dir, width=70, style="Custom.TEntry").pack(side=tk.LEFT, padx=5)
+        ttk.Entry(output_select_frame, textvariable=self.output_dir, width=58, style="Custom.TEntry").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         ttk.Button(output_select_frame, text="Browse", command=self.browse_output, style="Custom.TButton").pack(side=tk.LEFT, padx=5)
         
-        # Download settings frame
-        settings_frame = ttk.LabelFrame(main_container, text="Download Settings", padding="15", style="Custom.TLabelframe")
-        settings_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        ttk.Label(settings_frame, text="Concurrent Downloads:", font=('Segoe UI', 10)).pack(side=tk.LEFT, padx=5)
+        # Download settings frame on the right side of file selection
+        settings_frame.columnconfigure(0, weight=1)
+        settings_frame.columnconfigure(1, weight=1)
+        ttk.Label(settings_frame, text="Concurrent Downloads:", font=('Segoe UI', 10)).grid(row=0, column=0, sticky="w", padx=5, pady=5)
         self.concurrent_var = tk.StringVar(value="3")
         concurrent_spinbox = ttk.Spinbox(settings_frame, from_=1, to=10, width=5, textvariable=self.concurrent_var)
-        concurrent_spinbox.pack(side=tk.LEFT, padx=5)
+        concurrent_spinbox.grid(row=0, column=1, sticky="e", padx=5, pady=5)
         
         # Files list frame with modern styling
-        list_frame = ttk.LabelFrame(main_container, text="Files to Download", padding="15", style="Custom.TLabelframe")
+        list_frame = ttk.LabelFrame(main_container, text="Files to Download", padding="10", style="Custom.TLabelframe")
         list_frame.pack(fill=tk.BOTH, expand=True)
         
         # Create modern treeview
@@ -171,23 +183,76 @@ class M3UDownloaderGUI:
         directory = filedialog.askdirectory()
         if directory:
             self.output_dir.set(directory)
+        self.load_m3u()
             
     def load_m3u(self):
         m3u_file = self.m3u_path.get()
         if not m3u_file:
             messagebox.showerror("Error", "Please select an M3U file first")
             return
-            
+
+        if self.loading_m3u:
+            messagebox.showinfo("Info", "An M3U file is already loading")
+            return
+
+        self.loading_m3u = True
+        self.entries = []
+        self.download_items = {}
+        self.search_var.set("")
+        self.tree.delete(*self.tree.get_children())
+        self.status_var.set("Loading M3U file...")
+
+        worker = threading.Thread(
+            target=self._load_m3u_worker,
+            args=(m3u_file,),
+            daemon=True,
+        )
+        worker.start()
+        self.window.after(50, self._process_load_queue)
+
+    def _load_m3u_worker(self, m3u_file: str):
+        batch = []
+        batch_size = 250
+
         try:
-            self.entries = M3UParser.parse(m3u_file)
-            # clear any active search when loading a new file
-            self.search_var.set("")
-            self.tree.delete(*self.tree.get_children())
-            for entry in self.entries:
-                self.tree.insert("", tk.END, values=(entry.title, entry.url, "Pending", ""))
-            self.status_var.set(f"Loaded {len(self.entries)} items")
+            for entry in M3UParser.parse_iter(m3u_file):
+                batch.append(entry)
+                if len(batch) >= batch_size:
+                    self.load_queue.put(("batch", batch))
+                    batch = []
+
+            if batch:
+                self.load_queue.put(("batch", batch))
+
+            self.load_queue.put(("done", None))
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            self.load_queue.put(("error", str(e)))
+
+    def _process_load_queue(self):
+        processed_batch = False
+
+        while True:
+            try:
+                event, payload = self.load_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if event == "batch":
+                processed_batch = True
+                batch = payload
+                self.entries.extend(batch)
+                for entry in batch:
+                    self.tree.insert("", tk.END, values=(entry.title, entry.url, "Pending", ""))
+                self.status_var.set(f"Loading M3U file... {len(self.entries)} items")
+            elif event == "done":
+                self.loading_m3u = False
+                self.status_var.set(f"Loaded {len(self.entries)} items")
+            elif event == "error":
+                self.loading_m3u = False
+                messagebox.showerror("Error", payload)
+
+        if self.loading_m3u or processed_batch:
+            self.window.after(50, self._process_load_queue)
             
     def download_selected(self):
         selected_items = self.tree.selection()
